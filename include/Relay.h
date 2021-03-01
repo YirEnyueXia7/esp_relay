@@ -25,7 +25,6 @@ class RadioReceive;
 class Relay : public Module
 {
 private:
-    uint8_t operationFlag = 0; // 0每秒
 
     char powerStatTopic[80];
 
@@ -33,11 +32,11 @@ private:
     // 等待开关再次切换的时间（以毫秒为单位）。
     // 300对我来说效果很好，几乎没有引起注意。 如果您不想使用此功能，请设置为0。
     uint16_t specialFunctionTimeout = 300;
-    unsigned long buttonTimingStart[4];
-    unsigned long buttonIntervalStart[4];
-    uint8_t buttonStateFlag[4];
-    uint8_t switchCount[4];
-    unsigned long lastTime[4];
+    unsigned long buttonTimingStart[MAX_RELAY_NUM + MAX_PWM_NUM];
+    unsigned long buttonIntervalStart[MAX_RELAY_NUM + MAX_PWM_NUM];
+    uint8_t buttonStateFlag[MAX_RELAY_NUM + MAX_PWM_NUM];
+    uint8_t switchCount[MAX_RELAY_NUM + MAX_PWM_NUM];
+    unsigned long lastTime[MAX_RELAY_NUM + MAX_PWM_NUM];
     void cheackButton(uint8_t ch);
 
     // PWM
@@ -50,11 +49,11 @@ private:
     void ledTickerHandle();
     bool checkCanLed(bool re = false);
 
-    void httpDo(WEB_SERVER_REQUEST);
-    void httpSetting(WEB_SERVER_REQUEST);
-    void httpHa(WEB_SERVER_REQUEST);
+    void httpDo(WebServer *server);
+    void httpSetting(WebServer *server);
+    void httpHa(WebServer *server);
 #ifdef USE_RCSWITCH
-    void httpRadioReceive(WEB_SERVER_REQUEST);
+    void httpRadioReceive(WebServer *server);
 #endif
 
     void loadModule(uint8_t module);
@@ -62,8 +61,9 @@ private:
     void reportChannel(uint8_t ch);
 
 public:
+    uint8_t operationFlag = 0; // 0每秒
     RelayConfigMessage config;
-    uint8_t lastState = 0;
+    uint16_t lastState = 0;
     uint8_t channels = 0;
     Ticker ledTicker;
 
@@ -78,7 +78,7 @@ public:
     void init();
     String getModuleName() { return F("relay"); }
     String getModuleCNName();
-    String getModuleVersion() { return F("2020.10.01.2300"); }
+    String getModuleVersion() { return F("2021.01.12.2200"); }
     String getModuleAuthor() { return F("情留メ蚊子"); }
     bool moduleLed();
 
@@ -93,9 +93,9 @@ public:
     void mqttConnected();
     void mqttDiscovery(bool isEnable = true);
 
-    void httpAdd(AsyncWebServer *server);
-    void httpHtml(WEB_SERVER_REQUEST);
-    String httpGetStatus(WEB_SERVER_REQUEST);
+    void httpAdd(WebServer *server);
+    void httpHtml(WebServer *server);
+    String httpGetStatus(WebServer *server);
 
     void switchRelay(uint8_t ch, bool isOn, bool isSave = true);
 };

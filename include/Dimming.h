@@ -7,10 +7,14 @@
 
 #ifdef ESP8266
 #define PWM_RANGE 1023
+#ifndef PWM_SHIFT
 #define PWM_SHIFT 1
+#endif
 #else
 #define PWM_RANGE 4095
+#ifndef PWM_SHIFT
 #define PWM_SHIFT 4
+#endif
 #endif
 
 class Dimming
@@ -40,10 +44,11 @@ public:
 
     void loop();
 
-    void httpSetBrightness(WEB_SERVER_REQUEST);
-    void httpHtml(WEB_SERVER_REQUEST);
-    void httpHa(WEB_SERVER_REQUEST, uint8_t ch);
-    String httpGetStatus(WEB_SERVER_REQUEST);
+    void httpSetBrightness(WebServer *server);
+    void httpHtml(WebServer *server);
+    void httpHa(WebServer *server, uint8_t ch);
+    void mqttDiscovery(char *message, uint8_t ch);
+    String httpGetStatus(WebServer *server);
 };
 
 #endif

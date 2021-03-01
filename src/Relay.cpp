@@ -5,6 +5,9 @@
 #ifdef USE_HOMEKIT
 #include "HomeKit.h"
 #endif
+#ifdef USE_SHUJI
+#include <ShiftRegister74HC595.h>
+#endif
 
 uint8_t LED_PIN = 99;
 uint8_t RFRECV_PIN = 99;
@@ -19,6 +22,10 @@ unsigned long colorOffTime[MAX_PWM_NUM];
 uint8_t PWM_BRIGHTNESS_PIN[MAX_PWM_NUM];
 uint8_t PWM_TEMPERATURE_PIN[MAX_PWM_NUM];
 uint8_t ROT_PIN[2];
+#endif
+
+#ifdef USE_SHUJI
+ShiftRegister74HC595<2> sr(4, 17, 16);
 #endif
 
 #pragma region 继承
@@ -99,6 +106,13 @@ void Relay::init()
     }
 
     checkCanLed(true);
+#ifdef USE_SHUJI
+    if (config.module_type == Shuji_CH6_PWM6 || config.module_type == Shuji_CH12)
+    {
+        sr.set(7, true);
+        sr.set(15, true);
+    }
+#endif
 }
 
 bool Relay::moduleLed()
@@ -111,7 +125,7 @@ bool Relay::moduleLed()
     }
 #endif
 
-    if (WiFi.status() == WL_CONNECTED && Mqtt::mqttClient.connected())
+    if (bitRead(Config::statusFlag, 0) && bitRead(Config::statusFlag, 1))
     {
         if (config.led == 0)
         {
@@ -146,24 +160,18 @@ void Relay::loop()
         radioReceive->loop();
     }
 #endif
-
-    if (bitRead(operationFlag, 0))
-    {
-        bitClear(operationFlag, 0);
-        if (perSecond % 60 == 0)
-        {
-            checkCanLed();
-        }
-        if (config.report_interval > 0 && (perSecond % config.report_interval) == 0)
-        {
-            reportPower();
-        }
-    }
 }
 
 void Relay::perSecondDo()
 {
-    bitSet(operationFlag, 0);
+    if (perSecond % 60 == 0)
+    {
+        checkCanLed();
+    }
+    if (config.report_interval > 0 && (perSecond % config.report_interval) == 0)
+    {
+        reportPower();
+    }
 }
 #pragma endregion
 
@@ -190,7 +198,7 @@ void Relay::readConfig()
 
 void Relay::resetConfig()
 {
-    Debug::AddInfo(PSTR("moduleResetConfig . . . OK"));
+    Log::Info(PSTR("moduleResetConfig . . . OK"));
     memset(&config, 0, sizeof(RelayConfigMessage));
     config.module_type = 0;
     config.led_light = 50;
@@ -200,15 +208,22 @@ void Relay::resetConfig()
 
 #ifdef WIFI_SSID
 #ifdef ESP8266
+#ifdef USE_DIMMING
     config.module_type = Yeelight;
 #else
-    config.module_type = CH2_PWM;
+    config.module_type = CH1;
 #endif
+#else
+    config.module_type = CH1_PWM1;
+#endif
+    globalConfig.mqtt.interval = 60 * 60;
     globalConfig.debug.type = globalConfig.debug.type | 4;
-    strcpy(globalConfig.uid, UID);
+
     config.switch_mode = 1;
     config.led_type = 2;
-    config.led = 2;
+    config.led_start = 1800;
+    config.led_end = 2300;
+    config.led = 1;
     config.report_interval = 60 * 5;
 #endif
 }
@@ -269,7 +284,7 @@ void Relay::mqttDiscovery(bool isEnable)
         {
             cmndTopic[strlen(cmndTopic) - 1] = ch + 49;           // 48 + 1 + ch
             powerStatTopic[strlen(powerStatTopic) - 1] = ch + 49; // 48 + 1 + ch
-            sprintf(message, PSTR("{\"name\":\"%s_%d\","
+            sprintf(message, PSTR("{\"name\":\"%s_ch%d\","
                                   "\"cmd_t\":\"%s\","
                                   "\"stat_t\":\"%s\","
                                   "\"pl_off\":\"off\","
@@ -281,7 +296,13 @@ void Relay::mqttDiscovery(bool isEnable)
                     cmndTopic,
                     powerStatTopic,
                     availability.c_str());
-            //Debug::AddInfo(PSTR("discovery: %s - %s"), topic, message);
+#ifdef USE_DIMMING
+            if (dimming && ch >= dimming->pwmstartch)
+            {
+                dimming->mqttDiscovery(message, ch);
+            }
+#endif
+            //Log::Info(PSTR("discovery: %s - %s"), topic, message);
             Mqtt::publish(topic, message, true);
         }
         else
@@ -298,26 +319,26 @@ void Relay::mqttDiscovery(bool isEnable)
 
 #pragma region Http
 
-void Relay::httpAdd(AsyncWebServer *server)
+void Relay::httpAdd(WebServer *server)
 {
-    server->on(F("/relay_do"), std::bind(&Relay::httpDo, this, WEB_SERVER_REQUEST_PARAMETER));
+    server->on(F("/relay_do"), std::bind(&Relay::httpDo, this, server));
 #ifdef USE_DIMMING
     if (dimming)
     {
-        server->on(F("/set_brightness"), std::bind(&Dimming::httpSetBrightness, dimming, WEB_SERVER_REQUEST_PARAMETER));
+        server->on(F("/set_brightness"), std::bind(&Dimming::httpSetBrightness, dimming, server));
     }
 #endif
-    server->on(F("/relay_setting"), std::bind(&Relay::httpSetting, this, WEB_SERVER_REQUEST_PARAMETER));
-    server->on(F("/ha"), std::bind(&Relay::httpHa, this, WEB_SERVER_REQUEST_PARAMETER));
+    server->on(F("/relay_setting"), std::bind(&Relay::httpSetting, this, server));
+    server->on(F("/ha"), std::bind(&Relay::httpHa, this, server));
 #ifdef USE_RCSWITCH
-    server->on(F("/rf_do"), std::bind(&Relay::httpRadioReceive, this, WEB_SERVER_REQUEST_PARAMETER));
+    server->on(F("/rf_do"), std::bind(&Relay::httpRadioReceive, this, server));
 #endif
 #ifdef USE_HOMEKIT
-    server->on(F("/homekit"), std::bind(&homekit_http, WEB_SERVER_REQUEST_PARAMETER));
+    server->on(F("/homekit"), std::bind(&homekit_http, server));
 #endif
 }
 
-String Relay::httpGetStatus(WEB_SERVER_REQUEST)
+String Relay::httpGetStatus(WebServer *server)
 {
     String data;
     for (size_t ch = 0; ch < channels; ch++)
@@ -335,20 +356,25 @@ String Relay::httpGetStatus(WEB_SERVER_REQUEST)
     return data.substring(1);
 }
 
-void Relay::httpHtml(WEB_SERVER_REQUEST)
+void Relay::httpHtml(WebServer *server)
 {
+    char html[512] = {0};
     server->sendContent_P(
         PSTR("<table class='gridtable'><thead><tr><th colspan='2'>开关状态</th></tr></thead><tbody>"
              "<tr style='text-align:center'><td colspan='2'>"));
 
     for (size_t ch = 0; ch < channels; ch++)
     {
-        snprintf_P(tmpData, sizeof(tmpData),
+        snprintf_P(html, sizeof(html),
                    PSTR(" <button type='button' style='width:50px' onclick=\"ajaxPost('/relay_do', 'do=T&c=%d');\" id='relay_%d' class='btn-%s'>%s</button>"),
                    ch + 1, ch + 1,
                    bitRead(lastState, ch) ? PSTR("success") : PSTR("info"),
                    bitRead(lastState, ch) ? PSTR("开") : PSTR("关"));
-        server->sendContent_P(tmpData);
+        server->sendContent_P(html);
+        if (channels >= 12 && (ch + 1) == (channels / 2))
+        {
+            server->sendContent_P("<br><br>");
+        }
     }
 
 #ifdef USE_DIMMING
@@ -370,8 +396,8 @@ void Relay::httpHtml(WEB_SERVER_REQUEST)
                  "<select id='module_type' name='module_type' style='width:150px'>"));
         for (int count = 0; count < SupportedModules::MAXMODULE; count++)
         {
-            snprintf_P(tmpData, sizeof(tmpData), PSTR("<option value='%d'>%s</option>"), count, Modules[count].name);
-            server->sendContent_P(tmpData);
+            snprintf_P(html, sizeof(html), PSTR("<option value='%d'>%s</option>"), count, Modules[count].name);
+            server->sendContent_P(html);
         }
 
         server->sendContent_P(PSTR("</select></td></tr>"));
@@ -389,7 +415,8 @@ void Relay::httpHtml(WEB_SERVER_REQUEST)
         server->sendContent_P(
             PSTR("<tr><td>开关模式</td><td>"
                  "<label class='bui-radios-label'><input type='radio' name='power_mode' value='0'/><i class='bui-radios'></i> 自锁</label>&nbsp;&nbsp;&nbsp;&nbsp;"
-                 "<label class='bui-radios-label'><input type='radio' name='power_mode' value='1'/><i class='bui-radios'></i> 互锁</label>"
+                 "<label class='bui-radios-label'><input type='radio' name='power_mode' value='1'/><i class='bui-radios'></i> 互锁</label>&nbsp;&nbsp;&nbsp;&nbsp;"
+                 "<label class='bui-radios-label'><input type='radio' name='power_mode' value='2'/><i class='bui-radios'></i> 点动</label>&nbsp;&nbsp;&nbsp;&nbsp;"
                  "</td></tr>"));
     }
 
@@ -410,15 +437,15 @@ void Relay::httpHtml(WEB_SERVER_REQUEST)
                  //"<label class='bui-radios-label'><input type='radio' name='led_type' value='3'/><i class='bui-radios'></i> WS2812</label>"
                  "</td></tr>"));
 
-        snprintf_P(tmpData, sizeof(tmpData),
+        snprintf_P(html, sizeof(html),
                    PSTR("<tr><td>指示灯亮度</td><td><input type='range' min='1' max='100' name='led_light' value='%d' onchange='ledLightRangOnChange(this)'/>&nbsp;<span>%d</span></td></tr>"),
                    config.led_light, config.led_light);
-        server->sendContent_P(tmpData);
+        server->sendContent_P(html);
 
-        snprintf_P(tmpData, sizeof(tmpData),
+        snprintf_P(html, sizeof(html),
                    PSTR("<tr><td>渐变时间</td><td><input type='number' name='relay_led_time' value='%d'>毫秒</td></tr>"),
                    config.led_time);
-        server->sendContent_P(tmpData);
+        server->sendContent_P(html);
 
         String tmp = "";
         for (uint8_t i = 0; i <= 23; i++)
@@ -455,18 +482,18 @@ void Relay::httpHtml(WEB_SERVER_REQUEST)
                  "</td></tr>"));
     }
 
-    snprintf_P(tmpData, sizeof(tmpData),
+    snprintf_P(html, sizeof(html),
                PSTR("<tr><td>主动上报间隔</td><td><input type='number' min='0' max='3600' name='report_interval' required value='%d'>&nbsp;秒，0关闭</td></tr>"),
                config.report_interval);
-    server->sendContent_P(tmpData);
+    server->sendContent_P(html);
 
 #ifdef USE_DIMMING
     if (dimming)
     {
-        snprintf_P(tmpData, sizeof(tmpData),
+        snprintf_P(html, sizeof(html),
                    PSTR("<tr><td>PWM最大亮度</td><td><input type='range' min='20' max='100' name='max_pwm' value='%d' onchange='this.nextSibling.nextSibling.innerHTML=this.value'/>&nbsp;<span>%d</span></td></tr>"),
                    config.max_pwm, config.max_pwm);
-        server->sendContent_P(tmpData);
+        server->sendContent_P(html);
     }
 #endif
 
@@ -483,20 +510,20 @@ void Relay::httpHtml(WEB_SERVER_REQUEST)
                  "<tr><td>学习模式</td><td>"));
         for (size_t ch = 0; ch < channels; ch++)
         {
-            snprintf_P(tmpData, sizeof(tmpData),
+            snprintf_P(html, sizeof(html),
                        PSTR(" <button type='button' style='width:60px' onclick=\"ajaxPost('/rf_do', 'do=s&c=%d')\" class='btn-success'>%d路</button>"),
                        ch + 1, ch + 1);
-            server->sendContent_P(tmpData);
+            server->sendContent_P(html);
         }
 
         server->sendContent_P(PSTR("</td></tr>"
                                    "<tr><td>删除模式</td><td>"));
         for (size_t ch = 0; ch < channels; ch++)
         {
-            snprintf_P(tmpData, sizeof(tmpData),
+            snprintf_P(html, sizeof(html),
                        PSTR(" <button type='button' style='width:60px' onclick=\"ajaxPost('/rf_do', 'do=d&c=%d')\" class='btn-info'>%d路</button>"),
                        ch + 1, ch + 1);
-            server->sendContent_P(tmpData);
+            server->sendContent_P(html);
         }
 
         server->sendContent_P(
@@ -504,7 +531,7 @@ void Relay::httpHtml(WEB_SERVER_REQUEST)
                  "<tr><td>全部删除</td><td>"));
         for (size_t ch = 0; ch < channels; ch++)
         {
-            snprintf_P(tmpData, sizeof(tmpData),
+            snprintf_P(html, sizeof(html),
                        PSTR(" <button type='button' style='width:60px' onclick=\"javascript:if(confirm('确定要清空射频遥控？')){ajaxPost('/rf_do', 'do=c&c=%d');}\" class='btn-danger'>%d路</button>"),
                        ch + 1, ch + 1);
         }
@@ -522,29 +549,29 @@ void Relay::httpHtml(WEB_SERVER_REQUEST)
 
     server->sendContent_P(
         PSTR("<script type='text/javascript'>"
-             "function setDataSub(data,key){if(key.substr(0,5)=='relay'){var t=id(key);var v=data[key];t.setAttribute('class',v==1?'btn-success':'btn-info');t.innerHTML=v==1?'开':'关';return true}return false}"));
+             "function setDataSub(data,key){if(key.substr(0,10)=='brightness'||key.substr(0,5)=='color'){var t=id(key);var v=data[key];t.value=v;t.nextSibling.nextSibling.innerHTML=v+(key.substr(0,10)=='brightness'?\"%\":\"\");return true}else if(key.substr(0,5)=='relay'){var t=id(key);var v=data[key];t.setAttribute('class',v==1?'btn-success':'btn-info');t.innerHTML=v==1?'开':'关';return true}return false}"));
 
-    snprintf_P(tmpData, sizeof(tmpData), PSTR("id('module_type').value=%d;setRadioValue('power_on_state', '%d');setRadioValue('power_mode', '%d');setRadioValue('switch_mode', '%d');"),
+    snprintf_P(html, sizeof(html), PSTR("id('module_type').value=%d;setRadioValue('power_on_state', '%d');setRadioValue('power_mode', '%d');setRadioValue('switch_mode', '%d');"),
                config.module_type, config.power_on_state, config.power_mode, config.switch_mode);
-    server->sendContent_P(tmpData);
+    server->sendContent_P(html);
 
     if (RELAY_LED_PIN[0] != 99)
     {
-        snprintf_P(tmpData, sizeof(tmpData), PSTR("setRadioValue('led_type', '%d');id('led_start').value=%d;id('led_end').value=%d;"),
+        snprintf_P(html, sizeof(html), PSTR("setRadioValue('led_type', '%d');id('led_start').value=%d;id('led_end').value=%d;"),
                    config.led_type, config.led_start, config.led_end);
-        server->sendContent_P(tmpData);
+        server->sendContent_P(html);
         server->sendContent_P(PSTR("function ledLightRangOnChange(the){the.nextSibling.nextSibling.innerHTML=the.value};"));
     }
 
     if (LED_PIN != 99)
     {
-        snprintf_P(tmpData, sizeof(tmpData), PSTR("setRadioValue('led', '%d');"), config.led);
-        server->sendContent_P(tmpData);
+        snprintf_P(html, sizeof(html), PSTR("setRadioValue('led', '%d');"), config.led);
+        server->sendContent_P(html);
     }
     server->sendContent_P(PSTR("</script>"));
 }
 
-void Relay::httpDo(WEB_SERVER_REQUEST)
+void Relay::httpDo(WebServer *server)
 {
     uint8_t ch = server->arg(F("c")).toInt() - 1;
     if (ch > channels)
@@ -555,12 +582,13 @@ void Relay::httpDo(WEB_SERVER_REQUEST)
     String str = server->arg(F("do"));
     switchRelay(ch, (str == F("on") ? true : (str == F("off") ? false : !bitRead(lastState, ch))));
 
-    snprintf_P(tmpData, sizeof(tmpData), PSTR("{\"code\":1,\"msg\":\"操作成功\",\"data\":{%s}}"), httpGetStatus(server).c_str());
-    server->send_P(200, PSTR("application/json"), tmpData);
+    char html[512] = {0};
+    snprintf_P(html, sizeof(html), PSTR("{\"code\":1,\"msg\":\"操作成功\",\"data\":{%s}}"), httpGetStatus(server).c_str());
+    server->send_P(200, PSTR("application/json"), html);
 }
 
 #ifdef USE_RCSWITCH
-void Relay::httpRadioReceive(WEB_SERVER_REQUEST)
+void Relay::httpRadioReceive(WebServer *server)
 {
     if (!radioReceive)
     {
@@ -603,7 +631,7 @@ void Relay::httpRadioReceive(WEB_SERVER_REQUEST)
 }
 #endif
 
-void Relay::httpSetting(WEB_SERVER_REQUEST)
+void Relay::httpSetting(WebServer *server)
 {
     config.power_on_state = server->arg(F("power_on_state")).toInt();
     config.report_interval = server->arg(F("report_interval")).toInt();
@@ -668,13 +696,13 @@ void Relay::httpSetting(WEB_SERVER_REQUEST)
     }
 }
 
-void Relay::httpHa(WEB_SERVER_REQUEST)
+void Relay::httpHa(WebServer *server)
 {
-    char attachment[100];
-    snprintf_P(attachment, sizeof(attachment), PSTR("attachment; filename=%s.yaml"), UID);
+    char html[512];
+    snprintf_P(html, sizeof(html), PSTR("attachment; filename=%s.yaml"), UID);
 
     server->setContentLength(CONTENT_LENGTH_UNKNOWN);
-    server->sendHeader(F("Content-Disposition"), attachment);
+    server->sendHeader(F("Content-Disposition"), html);
     server->send_P(200, PSTR("application/octet-stream"), "light:\r\n");
 
     String availability = Mqtt::getTeleTopic(F("availability"));
@@ -686,9 +714,9 @@ void Relay::httpHa(WEB_SERVER_REQUEST)
         cmndTopic[strlen(cmndTopic) - 1] = ch + 49;           // 48 + 1 + ch
         powerStatTopic[strlen(powerStatTopic) - 1] = ch + 49; // 48 + 1 + ch
 
-        snprintf_P(tmpData, sizeof(tmpData),
+        snprintf_P(html, sizeof(html),
                    PSTR("  - platform: mqtt\r\n"
-                        "    name: \"%s_l%d\"\r\n"
+                        "    name: \"%s_ch%d\"\r\n"
                         "    state_topic: \"%s\"\r\n"
                         "    command_topic: \"%s\"\r\n"
                         "    payload_on: \"on\"\r\n"
@@ -697,7 +725,7 @@ void Relay::httpHa(WEB_SERVER_REQUEST)
                         "    payload_available: \"online\"\r\n"
                         "    payload_not_available: \"offline\"\r\n"),
                    UID, ch + 1, powerStatTopic, cmndTopic, availability.c_str());
-        server->sendContent_P(tmpData);
+        server->sendContent_P(html);
 #ifdef USE_DIMMING
         if (dimming && ch >= dimming->pwmstartch)
         {
@@ -706,10 +734,7 @@ void Relay::httpHa(WEB_SERVER_REQUEST)
 #endif
         server->sendContent_P(PSTR("\r\n"));
     }
-
-#ifdef USE_ESP_ASYNC_WEBSERVER
-    server->sendContent();
-#endif
+    server->sendContent("");
 }
 #pragma endregion
 
@@ -757,7 +782,7 @@ void Relay::ledPWM(uint8_t ch, bool isOn)
                 }
             }
             ledTicker.detach();
-            Debug::AddInfo(PSTR("ledTicker detach"));
+            // Log::Info(PSTR("ledTicker detach"));
         }
     }
     else
@@ -765,7 +790,7 @@ void Relay::ledPWM(uint8_t ch, bool isOn)
         if (!ledTicker.active())
         {
             ledTicker.attach_ms(config.led_time, []() { ((Relay *)module)->ledTickerHandle(); });
-            Debug::AddInfo(PSTR("ledTicker active"));
+            // Log::Info(PSTR("ledTicker active"));
         }
     }
 }
@@ -776,6 +801,22 @@ void Relay::led(uint8_t ch, bool isOn)
     {
         return;
     }
+
+#ifdef USE_SHUJI
+    if (config.module_type == Shuji_CH6_PWM6 || config.module_type == Shuji_CH12)
+    {
+        if (ch < 6)
+        {
+            ch += 1;
+        }
+        else
+        {
+            ch += 3;
+        }
+        sr.set(ch, !isOn);
+        return;
+    }
+#endif
 
     if (config.led_type == 1)
     {
@@ -812,12 +853,19 @@ bool Relay::checkCanLed(bool re)
         if ((!result || config.led_type != 2) && ledTicker.active())
         {
             ledTicker.detach();
-            Debug::AddInfo(PSTR("ledTicker detach2"));
+            // Log::Info(PSTR("ledTicker detach2"));
         }
         Relay::canLed = result;
-        Debug::AddInfo(result ? PSTR("led can light") : PSTR("led can not light"));
+        Log::Info(result ? PSTR("led can light") : PSTR("led can not light"));
         for (uint8_t ch = 0; ch < channels; ch++)
         {
+#ifdef USE_SHUJI
+            if (config.module_type == Shuji_CH6_PWM6 || config.module_type == Shuji_CH12)
+            {
+                result &&config.led_type != 0 ? led(ch, bitRead(lastState, ch)) : led(ch, true);
+                continue;
+            }
+#endif
             if (RELAY_LED_PIN[ch] != 99)
             {
                 result &&config.led_type != 0 ? led(ch, bitRead(lastState, ch)) : analogWrite(RELAY_LED_PIN[ch], 0);
@@ -833,7 +881,7 @@ void Relay::switchRelay(uint8_t ch, bool isOn, bool isSave)
 {
     if (ch > channels)
     {
-        Debug::AddInfo(PSTR("invalid channel: %d"), ch);
+        Log::Info(PSTR("invalid channel: %d"), ch);
         return;
     }
 
@@ -857,7 +905,7 @@ void Relay::switchRelay(uint8_t ch, bool isOn, bool isSave)
     else
     {
 #endif
-        Debug::AddInfo(PSTR("Relay %d . . . %s"), ch + 1, isOn ? "ON" : "OFF");
+        Log::Info(PSTR("Relay %d . . . %s"), ch + 1, isOn ? "ON" : "OFF");
         digitalWrite(RELAY_PIN[ch], isOn ? HIGH : LOW);
 #ifdef USE_DIMMING
     }
@@ -872,6 +920,12 @@ void Relay::switchRelay(uint8_t ch, bool isOn, bool isSave)
     if (Relay::canLed)
     {
         led(ch, isOn);
+    }
+
+    if (isOn && config.power_mode == 2)
+    {
+        delay(100);
+        switchRelay(ch, !isOn, isSave);
     }
 }
 
@@ -892,26 +946,27 @@ void Relay::cheackButton(uint8_t ch)
 #ifdef USE_DIMMING
         if (dimming && ch >= dimming->pwmstartch && !currentState && bitRead(dimmingState[ch - dimming->pwmstartch], 1)) // 如果低电平 并且进入调光模式
         {
+            uint8_t pwmch = ch - dimming->pwmstartch;
             if (millis() - 100 > lastTime[ch])
             {
-                if (!bitRead(dimmingState[ch - dimming->pwmstartch], 0))
+                if (!bitRead(dimmingState[pwmch], 0))
                 {
-                    if (config.brightness[ch] < 100)
+                    if (config.brightness[pwmch] < 100)
                     {
-                        config.brightness[ch]++;
+                        config.brightness[pwmch]++;
                     }
                 }
                 else
                 {
-                    if (config.brightness[ch] > 10)
+                    if (config.brightness[pwmch] > 2)
                     {
-                        config.brightness[ch]--;
+                        config.brightness[pwmch]--;
                     }
                 }
-                //Debug::AddInfo(PSTR("brightness %d : %d"), ch + 1, config.brightness[ch]);
+                //Log::Info(PSTR("brightness %d : %d"), ch + 1, config.brightness[pwmch]);
                 switchRelay(ch, true, true);
                 lastTime[ch] = millis();
-                bitSet(dimmingState[ch - dimming->pwmstartch], 2);
+                bitSet(dimmingState[pwmch], 2);
             }
         }
 #endif
@@ -927,24 +982,25 @@ void Relay::cheackButton(uint8_t ch)
 #ifdef USE_DIMMING
             if (dimming && ch >= dimming->pwmstartch)
             {
+                uint8_t pwmch = ch - dimming->pwmstartch;
                 if (!currentState) // 如果未开灯，低电平亮， 如果已开灯，高电平关
                 {
                     if (!bitRead(lastState, ch))
                     {
-                        if (PWM_TEMPERATURE_PIN[ch - dimming->pwmstartch] != 99 && millis() - colorOffTime[ch] < (5 * 1000)) // 关灯少于5秒
+                        if (PWM_TEMPERATURE_PIN[pwmch] != 99 && millis() - colorOffTime[pwmch] < (5 * 1000)) // 关灯少于5秒
                         {
-                            config.color_index[ch] = (config.color_index[ch] + 1) % 3;
-                            if (config.color_index[ch] == 1)
+                            config.color_index[pwmch] = (config.color_index[pwmch] + 1) % 3;
+                            if (config.color_index[pwmch] == 1)
                             {
-                                config.color_temp[ch] = 500;
+                                config.color_temp[pwmch] = 500;
                             }
-                            else if (config.color_index[ch] == 2)
+                            else if (config.color_index[pwmch] == 2)
                             {
-                                config.color_temp[ch] = 153;
+                                config.color_temp[pwmch] = 153;
                             }
                             else
                             {
-                                config.color_temp[ch] = 326;
+                                config.color_temp[pwmch] = 326;
                             }
                         }
                         switchRelay(ch, true, true);
@@ -952,35 +1008,35 @@ void Relay::cheackButton(uint8_t ch)
                     }
                     else
                     {
-                        if (config.brightness[ch] >= 100) // 切换调光模式
+                        if (config.brightness[pwmch] >= 100) // 切换调光模式
                         {
-                            bitSet(dimmingState[ch - dimming->pwmstartch], 0);
+                            bitSet(dimmingState[pwmch], 0);
                         }
-                        if (config.brightness[ch] <= 10)
+                        if (config.brightness[pwmch] <= 10)
                         {
-                            bitClear(dimmingState[ch - dimming->pwmstartch], 0);
+                            bitClear(dimmingState[pwmch], 0);
                         }
 
-                        lastTime[ch] = millis() + 400; // 首次500毫秒才进入调光模式
-                        //bitClear(dimmingState[ch - dimming->pwmstartch], 0); // 每次进入亮度增加模式
-                        bitSet(dimmingState[ch - dimming->pwmstartch], 1);   // 调光模式
-                        bitClear(dimmingState[ch - dimming->pwmstartch], 2); // 重置为未调光状态
+                        lastTime[ch] = millis() + 900; // 首次1000毫秒才进入调光模式
+                        //bitClear(dimmingState[pwmch], 0); // 每次进入亮度增加模式
+                        bitSet(dimmingState[pwmch], 1);   // 调光模式
+                        bitClear(dimmingState[pwmch], 2); // 重置为未调光状态
                     }
                 }
                 else
                 {
-                    if (bitRead(dimmingState[ch - dimming->pwmstartch], 2)) // 进入调光模式就进行切换
+                    if (bitRead(dimmingState[pwmch], 2)) // 进入调光模式就进行切换
                     {
-                        bitWrite(dimmingState[ch - dimming->pwmstartch], 0, !bitRead(dimmingState[ch - dimming->pwmstartch], 0));
+                        bitWrite(dimmingState[pwmch], 0, !bitRead(dimmingState[pwmch], 0));
                     }
-                    if (bitRead(dimmingState[ch - dimming->pwmstartch], 1) && !bitRead(dimmingState[ch - dimming->pwmstartch], 2))
+                    if (bitRead(dimmingState[pwmch], 1) && !bitRead(dimmingState[pwmch], 2))
                     {
                         switchRelay(ch, false, true);
-                        colorOffTime[ch] = millis();
+                        colorOffTime[pwmch] = millis();
                         lastTime[ch] = millis();
                     }
-                    bitClear(dimmingState[ch - dimming->pwmstartch], 1);
-                    bitClear(dimmingState[ch - dimming->pwmstartch], 2);
+                    bitClear(dimmingState[pwmch], 1);
+                    bitClear(dimmingState[pwmch], 2);
                 }
             }
             else if (dimming && ch >= dimming->pwmstartch && ROT_PIN[0] != 99)
@@ -1030,7 +1086,7 @@ void Relay::cheackButton(uint8_t ch)
     if (switchCount[ch] > 0 && (millis() - buttonIntervalStart[ch]) > specialFunctionTimeout)
     {
         Led::led(200);
-        Debug::AddInfo(PSTR("switchCount %d : %d"), ch + 1, switchCount[ch]);
+        Log::Info(PSTR("switchCount %d : %d"), ch + 1, switchCount[ch]);
 
         if (switchCount[ch] >= 20)
         {
@@ -1074,7 +1130,7 @@ void Relay::loadModule(uint8_t module)
             break;
         }
         l = m.io[pos++];
-        if (l > 8)
+        if (l > 16)
         {
             break;
         }
@@ -1084,36 +1140,36 @@ void Relay::loadModule(uint8_t module)
             {
             case 1:
                 LED_PIN = m.io[pos++];
-                //Debug::AddInfo(PSTR("LED_PIN %d"), LED_PIN);
+                //Log::Info(PSTR("LED_PIN %d"), LED_PIN);
                 break;
             case 2:
                 RELAY_PIN[i] = m.io[pos++];
-                //Debug::AddInfo(PSTR("RELAY_PIN %d"), RELAY_PIN[i]);
+                //Log::Info(PSTR("RELAY_PIN %d"), RELAY_PIN[i]);
                 break;
             case 3:
                 BOTTON_PIN[i] = m.io[pos++];
-                //Debug::AddInfo(PSTR("BOTTON_PIN %d"), BOTTON_PIN[i]);
+                //Log::Info(PSTR("BOTTON_PIN %d"), BOTTON_PIN[i]);
                 break;
             case 4:
                 RELAY_LED_PIN[i] = m.io[pos++];
-                //Debug::AddInfo(PSTR("RELAY_LED_PIN %d"), RELAY_LED_PIN[i]);
+                //Log::Info(PSTR("RELAY_LED_PIN %d"), RELAY_LED_PIN[i]);
                 break;
             case 5:
                 RFRECV_PIN = m.io[pos++];
-                //Debug::AddInfo(PSTR("RFRECV_PIN %d"), RFRECV_PIN);
+                //Log::Info(PSTR("RFRECV_PIN %d"), RFRECV_PIN);
                 break;
 #ifdef USE_DIMMING
             case 6:
                 PWM_BRIGHTNESS_PIN[i] = m.io[pos++];
-                //Debug::AddInfo(PSTR("PWM_BRIGHTNESS_PIN %d"), PWM_BRIGHTNESS_PIN[i]);
+                //Log::Info(PSTR("PWM_BRIGHTNESS_PIN %d"), PWM_BRIGHTNESS_PIN[i]);
                 break;
             case 7:
                 PWM_TEMPERATURE_PIN[i] = m.io[pos++];
-                //Debug::AddInfo(PSTR("PWM_TEMPERATURE_PIN %d"), PWM_TEMPERATURE_PIN[i]);
+                //Log::Info(PSTR("PWM_TEMPERATURE_PIN %d"), PWM_TEMPERATURE_PIN[i]);
                 break;
             case 8:
                 ROT_PIN[i] = m.io[pos++];
-                //Debug::AddInfo(PSTR("ROT_PIN %d"), ROT_PIN[i]);
+                //Log::Info(PSTR("ROT_PIN %d"), ROT_PIN[i]);
                 break;
 #endif
             default:
@@ -1140,10 +1196,11 @@ void Relay::reportChannel(uint8_t ch)
 #ifdef USE_DIMMING
     if (dimming && ch >= dimming->pwmstartch)
     {
-        Mqtt::publish(Mqtt::getStatTopic(F("brightness")) + (ch + 1), String(config.brightness[ch]).c_str(), globalConfig.mqtt.retain);
-        if (PWM_TEMPERATURE_PIN[ch - dimming->pwmstartch] != 99)
+        uint8_t pwmch = ch - dimming->pwmstartch;
+        Mqtt::publish(Mqtt::getStatTopic(F("brightness")) + (ch + 1), String(config.brightness[pwmch]).c_str(), globalConfig.mqtt.retain);
+        if (PWM_TEMPERATURE_PIN[pwmch] != 99)
         {
-            Mqtt::publish(Mqtt::getStatTopic(F("color_temp")) + (ch + 1), String(config.color_temp[ch]).c_str(), globalConfig.mqtt.retain);
+            Mqtt::publish(Mqtt::getStatTopic(F("color_temp")) + (ch + 1), String(config.color_temp[pwmch]).c_str(), globalConfig.mqtt.retain);
         }
     }
 #endif

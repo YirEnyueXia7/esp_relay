@@ -46,9 +46,9 @@ void Dimming::init(Relay *_relay)
         }
     }
 
-#ifdef ESP866
-    analogWriteRange(1023);
-    analogWriteFreq(1600);
+#ifdef ESP8266
+    analogWriteRange(PWM_RANGE);
+    analogWriteFreq(3072);
 #endif
 
     RotaryInit();
@@ -59,9 +59,10 @@ void Dimming::init(Relay *_relay)
     pwm_range = PWM_RANGE * relay->config.max_pwm / 100;
 
 #ifdef WIFI_SSID
-    pinMode(23, OUTPUT);
+#ifdef ESP32
     pinMode(13, OUTPUT);
     pinMode(27, OUTPUT);
+#endif
 #endif
 }
 
@@ -72,7 +73,7 @@ void Dimming::loadPWM(uint8_t ch, uint8_t pin)
     pinMode(pin2, OUTPUT);
 #ifdef ESP32
     //19531
-    ledcSetup(ch, 19531, 12); // 12 kHz PWM, 8-bit resolutionXS
+    ledcSetup(ch, relay->config.module_type == Yeelight ? 3072 : 19531, 12); // 12 kHz PWM, 8-bit resolutionXS
     pinMatrixOutAttach(pin2, LEDC_HS_SIG_OUT0_IDX + ch, pwm_invert, false);
     pwm_invert = false;
 #endif
@@ -87,13 +88,14 @@ void Dimming::mqttCallback(char *topic, char *payload, char *cmnd)
         uint8_t ch = cmnd[10] - 49;
         if (pwmstartch <= ch)
         {
+            uint8_t pwmch = ch - pwmstartch;
             uint16_t d = atoi(payload);
             if (d < 1)
                 d = 0;
             if (d > 100)
                 d = 100;
-            relay->config.brightness[ch] = d;
-            relay->switchRelay(ch, relay->config.brightness[ch] != 0, true);
+            relay->config.brightness[pwmch] = d;
+            relay->switchRelay(ch, relay->config.brightness[pwmch] != 0, true);
         }
     }
     else if (strlen(cmnd) == 11 && strncmp(cmnd, "color_temp", 10) == 0) // strlen("power1") = 6
@@ -101,13 +103,14 @@ void Dimming::mqttCallback(char *topic, char *payload, char *cmnd)
         uint8_t ch = cmnd[10] - 49;
         if (pwmstartch <= ch)
         {
+            uint8_t pwmch = ch - pwmstartch;
             uint16_t t = atoi(payload);
             if (t < 153)
                 t = 153;
             if (t > 500)
                 t = 500;
-            relay->config.color_temp[ch] = t;
-            relay->switchRelay(ch, relay->config.brightness[ch] != 0, true);
+            relay->config.color_temp[pwmch] = t;
+            relay->switchRelay(ch, relay->config.brightness[pwmch] != 0, true);
         }
     }
 }
@@ -117,7 +120,7 @@ void Dimming::switchRelayPWM(uint8_t ch, bool isOn, bool isSave)
     uint8_t pwmch = ch - pwmstartch;
     if (!isOn)
     {
-        Debug::AddInfo(PSTR("PWMRelay %d . . . %s"), ch + 1, isOn ? "ON" : "OFF");
+        Log::Info(PSTR("PWMRelay %d . . . %s"), ch + 1, isOn ? "ON" : "OFF");
 
         target_color[pwmch] = 0;
         if (PWM_TEMPERATURE_PIN[pwmch] != 99)
@@ -131,16 +134,11 @@ void Dimming::switchRelayPWM(uint8_t ch, bool isOn, bool isSave)
         return;
     }
 
-#ifdef WIFI_SSID
-    digitalWrite(23, 1);
-    digitalWrite(13, 1);
-    digitalWrite(27, 1);
-#endif
-
-    uint8_t brightness = relay->config.brightness[ch];
+    uint8_t brightness = relay->config.brightness[pwmch];
     if (brightness == 0)
     {
         brightness = 100;
+        relay->config.brightness[pwmch] = brightness;
     }
 
     if (PWM_TEMPERATURE_PIN[pwmch] != 99)
@@ -150,7 +148,7 @@ void Dimming::switchRelayPWM(uint8_t ch, bool isOn, bool isSave)
         * ct = 153 = 2000K = Warm = CCWW = 00FF
         * ct = 500 = 6500K = Cold = CCWW = FF00
         */
-        uint16_t ct = relay->config.color_temp[ch];
+        uint16_t ct = relay->config.color_temp[pwmch];
         uint16_t my_ct = ct - 153;
         if (my_ct > 347)
         {
@@ -164,14 +162,48 @@ void Dimming::switchRelayPWM(uint8_t ch, bool isOn, bool isSave)
         target_color[pwmch] = (uint16_t)((float)(icold / dimmer) * (float)(pwm_range / 255));
         target_color[MAX_PWM_NUM * 2 - 1 - pwmch] = (uint16_t)((float)(iwarm / dimmer) * (float)(pwm_range / 255));
 
-        Debug::AddInfo(PSTR("Relay %d . . . Color:%d %d  %d  Brightness:%d %d %d"), ch + 1, ct, icold, target_color[MAX_PWM_NUM * 2 - 1 - pwmch], brightness, iwarm, target_color[pwmch]);
+        if (brightness == 100)
+        {
+            if (target_color[pwmch] > PWM_RANGE - 50)
+            {
+                target_color[pwmch] = PWM_RANGE;
+            }
+            if (target_color[MAX_PWM_NUM * 2 - 1 - pwmch] > PWM_RANGE - 50)
+            {
+                target_color[MAX_PWM_NUM * 2 - 1 - pwmch] = PWM_RANGE;
+            }
+        }
+
+#ifdef ESP8266
+        if (relay->config.module_type == Yeelight)
+        {
+            if (current_color[pwmch] < 102)
+            {
+                current_color[pwmch] = 102;
+            }
+            if (current_color[MAX_PWM_NUM * 2 - 1 - pwmch] < 102)
+            {
+                current_color[MAX_PWM_NUM * 2 - 1 - pwmch] = 102;
+            }
+        }
+#endif
+
+        Log::Info(PSTR("Relay %d . . . Color:%d %d  %d  Brightness:%d %d %d"), ch + 1, ct, icold, target_color[MAX_PWM_NUM * 2 - 1 - pwmch], brightness, iwarm, target_color[pwmch]);
     }
     else
     {
         float dimmer = 100 / (float)brightness;
         target_color[pwmch] = 255 / dimmer * (pwm_range / 255);
-        Debug::AddInfo(PSTR("Relay %d %d. . . Brightness:%d %d"), ch + 1, pwmch, brightness, target_color[pwmch]);
+        Log::Info(PSTR("Relay %d %d. . . Brightness:%d %d"), ch + 1, pwmch, brightness, target_color[pwmch]);
     }
+
+#ifdef WIFI_SSID
+#ifdef ESP32
+    digitalWrite(13, 1);
+    digitalWrite(27, brightness > 10 ? 1 : 0);
+#endif
+#endif
+
     if (!pwmTicker.active())
     {
         pwmTicker.attach_ms(10, []() { ((Relay *)module)->dimming->animate(); });
@@ -203,7 +235,7 @@ IRAM_ATTR void Dimming::animate(void)
             }
         }
 
-        //Debug::AddInfo(PSTR("a%d %d %d"), i, target_color[i], current_color[i]);
+        //Log::Info(PSTR("a%d %d %d"), i, target_color[i], current_color[i]);
 
 #ifdef ESP8266
         if (i < MAX_PWM_NUM)
@@ -237,9 +269,10 @@ IRAM_ATTR void Dimming::animate(void)
             return;
         }
     }
-    digitalWrite(23, 0);
+#ifdef ESP32
     digitalWrite(13, 0);
     digitalWrite(27, 0);
+#endif
 #endif
 }
 
@@ -321,12 +354,13 @@ void Dimming::RotaryHandler(void)
     }
     if (Rotary.position != 0)
     {
-        uint8_t ch = relay->channels - 1;
+        uint8_t ch = relay->channels;
+        uint8_t pwmch = ch - pwmstartch;
         bool pressed = !digitalRead(BOTTON_PIN[ch]);
         if (pressed)
         {
             Rotary.changed = 1;
-            int16_t t = relay->config.color_temp[ch];
+            int16_t t = relay->config.color_temp[pwmch];
             t = t + Rotary.position;
             if (t < 153)
             {
@@ -336,13 +370,13 @@ void Dimming::RotaryHandler(void)
             {
                 t = 500;
             }
-            Debug::AddInfo(PSTR("SetColorTemp:  %d"), Rotary.position);
-            relay->config.color_temp[ch] = t;
-            relay->switchRelay(ch, relay->config.brightness[ch] != 0, true);
+            Log::Info(PSTR("SetColorTemp:  %d"), Rotary.position);
+            relay->config.color_temp[pwmch] = t;
+            relay->switchRelay(ch, relay->config.brightness[pwmch] != 0, true);
         }
         else
         {
-            int16_t d = relay->config.brightness[ch];
+            int16_t d = relay->config.brightness[pwmch];
             d = d + Rotary.position;
             if (d < 1)
             {
@@ -352,9 +386,9 @@ void Dimming::RotaryHandler(void)
             {
                 d = 100;
             }
-            Debug::AddInfo(PSTR("SetBrightness:  %d"), Rotary.position);
-            relay->config.brightness[ch] = d;
-            relay->switchRelay(ch, relay->config.brightness[ch] != 0, true);
+            Log::Info(PSTR("SetBrightness:  %d"), Rotary.position);
+            relay->config.brightness[pwmch] = d;
+            relay->switchRelay(ch, relay->config.brightness[pwmch] != 0, true);
         }
         Rotary.position = 0;
     }
@@ -374,7 +408,7 @@ void Dimming::RotaryLoop(void)
 }
 #pragma endregion
 
-void Dimming::httpSetBrightness(WEB_SERVER_REQUEST)
+void Dimming::httpSetBrightness(WebServer *server)
 {
     uint8_t ch = server->arg(F("ch")).toInt() - 1;
     if (ch > relay->channels || pwmstartch > ch)
@@ -382,21 +416,23 @@ void Dimming::httpSetBrightness(WEB_SERVER_REQUEST)
         server->send_P(200, PSTR("application/json"), PSTR("{\"code\":0,\"msg\":\"不支持PWM\"}"));
         return;
     }
+    uint8_t pwmch = ch - pwmstartch;
     if (server->hasArg(F("c")))
     {
         int16_t c = server->arg(F("c")).toInt();
-        relay->config.color_temp[ch] = c;
-        relay->switchRelay(ch, relay->config.brightness[ch] != 0, true);
+        relay->config.color_temp[pwmch] = c;
+        relay->switchRelay(ch, relay->config.brightness[pwmch] != 0, true);
     }
     if (server->hasArg(F("b")))
     {
         int16_t b = server->arg(F("b")).toInt();
-        relay->config.brightness[ch] = b;
-        relay->switchRelay(ch, relay->config.brightness[ch] != 0, true);
+        relay->config.brightness[pwmch] = b;
+        relay->switchRelay(ch, relay->config.brightness[pwmch] != 0, true);
     }
 
-    snprintf_P(tmpData, sizeof(tmpData), PSTR("{\"code\":1,\"msg\":\"操作成功\",\"data\":{%s}}"), relay->httpGetStatus(server).c_str());
-    server->send_P(200, PSTR("application/json"), tmpData);
+    char html[512] = {0};
+    snprintf_P(html, sizeof(html), PSTR("{\"code\":1,\"msg\":\"操作成功\",\"data\":{%s}}"), relay->httpGetStatus(server).c_str());
+    server->send_P(200, PSTR("application/json"), html);
 }
 
 IRAM_ATTR void Dimming::loop()
@@ -404,72 +440,114 @@ IRAM_ATTR void Dimming::loop()
     RotaryLoop();
 }
 
-void Dimming::httpHtml(WEB_SERVER_REQUEST)
+void Dimming::httpHtml(WebServer *server)
 {
+    char html[512] = {0};
     for (size_t ch = pwmstartch; ch < relay->channels; ch++)
     {
-        if (PWM_TEMPERATURE_PIN[ch - pwmstartch] != 99)
+        uint8_t pwmch = ch - pwmstartch;
+        if (PWM_TEMPERATURE_PIN[pwmch] != 99)
         {
-            snprintf_P(tmpData, sizeof(tmpData),
+            snprintf_P(html, sizeof(html),
                        PSTR("</td></tr><tr><td>色温%d</td><td><input type='range' min='153' max='500' id='color%d' value='%d' onchange='ajaxPost(\"/set_brightness\", \"ch=%d&c=\"+this.value);this.nextSibling.nextSibling.innerHTML=this.value'/>&nbsp;<span>%d</span>"),
-                       ch - pwmstartch + 1, ch + 1, relay->config.color_temp[ch], ch + 1, relay->config.color_temp[ch]);
-            server->sendContent_P(tmpData);
+                       pwmch + 1, ch + 1, relay->config.color_temp[pwmch], ch + 1, relay->config.color_temp[pwmch]);
+            server->sendContent_P(html);
         }
 
-        snprintf_P(tmpData, sizeof(tmpData),
+        snprintf_P(html, sizeof(html),
                    PSTR("</td></tr><tr><td>亮度%d</td><td><input type='range' min='0' max='100' id='brightness%d' value='%d' onchange='ajaxPost(\"/set_brightness\", \"ch=%d&b=\"+this.value);this.nextSibling.nextSibling.innerHTML=this.value+\"%\"'/>&nbsp;<span>%d%</span>"),
-                   ch - pwmstartch + 1, ch + 1, relay->config.brightness[ch], ch + 1, relay->config.brightness[ch]);
-        server->sendContent_P(tmpData);
+                   pwmch + 1, ch + 1, relay->config.brightness[pwmch], ch + 1, relay->config.brightness[pwmch]);
+        server->sendContent_P(html);
     }
 }
 
-void Dimming::httpHa(WEB_SERVER_REQUEST, uint8_t ch)
+void Dimming::httpHa(WebServer *server, uint8_t ch)
 {
+    char html[512] = {0};
     char brightnessCmndTopic[100];
     strcpy(brightnessCmndTopic, Mqtt::getCmndTopic(F("brightness1")).c_str());
     char brightnessStatTopic[100];
     strcpy(brightnessStatTopic, Mqtt::getStatTopic(F("brightness1")).c_str());
 
-    char color_tempCmndTopic[100];
-    strcpy(color_tempCmndTopic, Mqtt::getCmndTopic(F("color_temp1")).c_str());
-    char color_tempStatTopic[100];
-    strcpy(color_tempStatTopic, Mqtt::getStatTopic(F("color_temp1")).c_str());
-
     // 亮度
     brightnessCmndTopic[strlen(brightnessCmndTopic) - 1] = ch + 49; // 48 + 1 + ch
     brightnessStatTopic[strlen(brightnessStatTopic) - 1] = ch + 49; // 48 + 1 + ch
-    snprintf_P(tmpData, sizeof(tmpData),
+    snprintf_P(html, sizeof(html),
                PSTR("    brightness_state_topic: \"%s\"\r\n"
                     "    brightness_command_topic: \"%s\"\r\n"
                     "    brightness_scale: 100\r\n"),
                brightnessStatTopic, brightnessCmndTopic);
-    server->sendContent_P(tmpData);
+    server->sendContent_P(html);
 
     // 色温
     if (PWM_TEMPERATURE_PIN[ch - pwmstartch] != 99)
     {
+        char color_tempCmndTopic[100];
+        strcpy(color_tempCmndTopic, Mqtt::getCmndTopic(F("color_temp1")).c_str());
+        char color_tempStatTopic[100];
+        strcpy(color_tempStatTopic, Mqtt::getStatTopic(F("color_temp1")).c_str());
+
         color_tempCmndTopic[strlen(color_tempCmndTopic) - 1] = ch + 49; // 48 + 1 + ch
         color_tempStatTopic[strlen(color_tempStatTopic) - 1] = ch + 49; // 48 + 1 + ch
-        snprintf_P(tmpData, sizeof(tmpData),
+        snprintf_P(html, sizeof(html),
                    PSTR("    color_temp_state_topic: \"%s\"\r\n"
                         "    color_temp_command_topic: \"%s\"\r\n"),
                    color_tempStatTopic, color_tempCmndTopic);
-        server->sendContent_P(tmpData);
+        server->sendContent_P(html);
     }
 }
 
-String Dimming::httpGetStatus(WEB_SERVER_REQUEST)
+void Dimming::mqttDiscovery(char *message, uint8_t ch)
+{
+    char newout[200];
+    // 亮度
+    char brightnessCmndTopic[100];
+    strcpy(brightnessCmndTopic, Mqtt::getCmndTopic(F("brightness1")).c_str());
+    char brightnessStatTopic[100];
+    strcpy(brightnessStatTopic, Mqtt::getStatTopic(F("brightness1")).c_str());
+    brightnessCmndTopic[strlen(brightnessCmndTopic) - 1] = ch + 49; // 48 + 1 + ch
+    brightnessStatTopic[strlen(brightnessStatTopic) - 1] = ch + 49; // 48 + 1 + ch
+    sprintf(newout, PSTR("\"bri_stat_t\":\"%s\","
+                         "\"bri_cmd_t\":\"%s\","
+                         "\"bri_scl\":100}"),
+            brightnessStatTopic, brightnessCmndTopic);
+
+    message[strlen(message) - 1] = ',';
+    strcat(message, newout);
+
+    // 色温
+    if (PWM_TEMPERATURE_PIN[ch - pwmstartch] != 99)
+    {
+        char color_tempCmndTopic[100];
+        strcpy(color_tempCmndTopic, Mqtt::getCmndTopic(F("color_temp1")).c_str());
+        char color_tempStatTopic[100];
+        strcpy(color_tempStatTopic, Mqtt::getStatTopic(F("color_temp1")).c_str());
+
+        color_tempCmndTopic[strlen(color_tempCmndTopic) - 1] = ch + 49; // 48 + 1 + ch
+        color_tempStatTopic[strlen(color_tempStatTopic) - 1] = ch + 49; // 48 + 1 + ch
+
+        sprintf(newout, PSTR("\"clr_temp_stat_t\":\"%s\","
+                             "\"clr_temp_cmd_t\":\"%s\"}"),
+                color_tempStatTopic, color_tempCmndTopic);
+
+        message[strlen(message) - 1] = ',';
+        strcat(message, newout);
+    }
+}
+
+String Dimming::httpGetStatus(WebServer *server)
 {
     String data;
     for (size_t ch = pwmstartch; ch < relay->channels; ch++)
     {
-        if (PWM_TEMPERATURE_PIN[ch - pwmstartch] != 99)
+        uint8_t pwmch = ch - pwmstartch;
+        if (PWM_TEMPERATURE_PIN[pwmch] != 99)
         {
             data += ",\"color" + String(ch + 1) + "\":";
-            data += String(relay->config.color_temp[ch]);
+            data += String(relay->config.color_temp[pwmch]);
         }
         data += ",\"brightness" + String(ch + 1) + "\":";
-        data += String(relay->config.brightness[ch]);
+        data += String(relay->config.brightness[pwmch]);
     }
     return data.substring(1);
 }
